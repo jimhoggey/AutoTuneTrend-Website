@@ -27,15 +27,30 @@ movement.
   Safari and Android Chrome.
 - Privacy: audio never leaves the device.
 
-## User flow (no settings)
+## User flow — mini multitrack (revised per user screenshot, 2026-08-26)
 
-1. Big round **Record** button → `getUserMedia` mic permission → recording
-   (button pulses, shows elapsed time).
-2. **Stop** → on-device processing (sub-second for typical clips).
-3. Result screen: **Play**, **Save**, **Record again**, and a small
-   "＋ add backing track" control (file input, any audio file) that mixes an
-   instrumental under the tuned vocal in playback and in the saved file.
-4. Save downloads a 16-bit WAV.
+The UI mimics the DAW multitrack look from the trend edits (user provided a
+screenshot: dark theme, timeline ruler on top, backing track as an orange
+waveform row, vocal tracks below, each with a circular avatar photo on the
+left and a colored waveform clip positioned on the timeline).
+
+1. **Backing track row** (top): "＋ add backing track" file input → decodes
+   and draws an orange waveform across the timeline. Optional — you can also
+   record a cappella layers with no backing track.
+2. **Vocal track rows** (4 by default, "+ add track" for more): each row has
+   a circular slot on the left containing a **record button**. Tap it →
+   mic permission → recording starts and the mix (backing + other layers)
+   plays from the current playhead so the take lands in time. Tap again to
+   stop.
+3. On stop, the take is **autotuned automatically** (DSP below) and appears
+   as a colored waveform clip at the position where recording started.
+   Clips can be dragged horizontally to nudge timing. Each track: re-record
+   replaces its clip; a small delete control clears it.
+4. After a track has a clip, its circular slot can be tapped to add a
+   **face photo** (file input with camera capture on mobile) — cosmetic,
+   to match the trend format.
+5. Transport: **Play/Stop** the whole mix (playhead moves), **Save** exports
+   the full mix as a 16-bit WAV.
 
 ## DSP (the effect)
 
@@ -53,8 +68,9 @@ movement.
   resample by `ratio = f_target / f_detected` (clamped 0.5–2.0), Hann
   window, 75% overlap. Unvoiced/silent frames pass through at ratio 1.
   Formants shift with the pitch; that chipmunk/robot artifact is desired.
-- **Mixing**: tuned vocal at 1.0, optional backing track at ~0.4, both from
-  t=0, soft-clipped/limited to avoid clipping in the WAV.
+- **Mixing**: each tuned vocal clip at 1.0 from its timeline offset,
+  optional backing track at ~0.4 from t=0, soft-clipped/limited to avoid
+  clipping in the WAV.
 
 ## Compatibility notes
 
@@ -73,5 +89,6 @@ microphone.
 
 ## Out of scope for v1
 
-Real-time monitoring while singing, key/intensity controls, video export,
-PWA install, accounts, analytics.
+Real-time monitoring while singing, key/intensity controls, video export
+(faces are cosmetic in-app only; Save exports audio), PWA install, accounts,
+analytics, clip trimming/splitting, per-track volume/mute/solo.
