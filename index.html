@@ -1113,7 +1113,11 @@ async function startExport(){
   };
   if (backing) peaks.set(backing, mkPeaks(backing));
   for (const t of tracks) if (t.buf) peaks.set(t.buf, mkPeaks(t.buf));
-  const dur = Math.min(mixDur(), window.__exportCap || Infinity);
+  let dur = mixDur();
+  let lastVocalEnd = 0;                                  // stop soon after vocals end
+  for (const t of tracks) if (t.buf) lastVocalEnd = Math.max(lastVocalEnd, t.start + t.buf.duration);
+  if (lastVocalEnd > 0) dur = Math.min(dur, lastVocalEnd + 1.0);
+  dur = Math.min(dur, window.__exportCap || Infinity);
   const msDest = c.createMediaStreamDestination();       // audible + captured
   const fan = c.createGain();
   fan.connect(c.destination); fan.connect(msDest);
