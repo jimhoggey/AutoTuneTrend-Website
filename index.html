@@ -70,6 +70,11 @@
     border-radius:8px; padding:8px 14px; font-size:13px; cursor:pointer;
   }
   .lane canvas.backwave{position:absolute; left:0; top:4px;}
+  .secchip{
+    position:absolute; top:2px; z-index:2; cursor:pointer;
+    background:rgba(0,0,0,.65); border:1px solid rgba(255,122,26,.5); color:var(--orange);
+    font-size:10px; line-height:1; padding:3px 7px; border-radius:8px;
+  }
 
   .clip{
     position:absolute; top:4px; height:calc(var(--rowh) - 9px); border-radius:8px;
@@ -104,6 +109,10 @@
   }
   #saveBtn:disabled{opacity:.4;}
   #phTime{font-size:12px; color:var(--dim); min-width:44px; font-variant-numeric:tabular-nums;}
+  #backVolWrap{display:flex; align-items:center; gap:6px; color:var(--orange); font-size:14px;}
+  #backVolSlider{width:90px; accent-color:var(--orange);}
+  #vocVolWrap{display:flex; align-items:center; gap:6px; font-size:13px;}
+  #vocVolSlider{width:90px; accent-color:var(--ink);}
 </style>
 </head>
 <body>
@@ -124,6 +133,8 @@
 
 <div id="transport">
   <span id="phTime">0.0s</span>
+  <span id="backVolWrap">♫<input type="range" id="backVolSlider" min="0" max="120" value="40" aria-label="backing track volume"></span>
+  <span id="vocVolWrap">🎤<input type="range" id="vocVolSlider" min="0" max="200" value="100" aria-label="vocal volume"></span>
   <button id="playBtn" aria-label="play">▶</button>
   <button id="saveBtn">Save</button>
 </div>
@@ -147,6 +158,10 @@ let ph = 0;                     // playhead position (seconds)
 let playing = false, liveSrcs = [], phBase = 0, ctxT0 = 0, raf = 0;
 let recState = null;            // {track, mr, stream, chunks, start}
 let faceTarget = null;
+let backVol = 0.4;              // backing track gain (slider-controlled)
+let backGainNode = null;        // live backing GainNode while playing
+let vocVol = 1.0;               // vocal clips gain (slider-controlled)
+let vocGainNodes = [];          // live vocal GainNodes while playing
 
 function ensureCtx(){
   if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
@@ -240,6 +255,8 @@ $('backFile').onchange = async e => {
     backing = await decode(ab);
     backLane.querySelector('.addback').style.display = 'none';
     updateTL();
+    window.__sections = await detectSections(backing);
+    renderSections();
   }catch(_){ showErr("couldn't read that audio file — try a different one"); }
 };
 function drawBacking(){
@@ -351,7 +368,7 @@ async function startRec(track){
   let stream;
   try{
     stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: true }
+      audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: false }
     });
   }catch(_){
     showErr('mic access needed — allow the microphone and tap record again');
@@ -367,8 +384,31 @@ async function startRec(track){
   const chunks = [];
   mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
   mr.onstop = finishRec;
-  recState = { track, mr, stream, chunks, start: ph };
-  mr.start();
+  // live placeholder clip + mic level meter (analyser is never routed to output)
+  const ghost = document.createElement('div');
+  ghost.className = 'clip ghost';
+  ghost.style.cssText = `left:${ph * PPS}px;width:2px;background:${track.color}18;` +
+    `border:1px dashed ${track.color}66;pointer-events:none`;
+  const level = document.createElement('div');
+  level.style.cssText = 'position:absolute;left:0;width:100%;top:50%;' +
+    `transform:translateY(-50%);height:0;background:${track.color}b3`;
+  ghost.appendChild(level);
+  track.lane.appendChild(ghost);
+  const micSrc = c.createMediaStreamSource(stream);
+  const analyser = c.createAnalyser();
+  analyser.fftSize = 512;
+  micSrc.connect(analyser);
+  recState = { track, mr, stream, chunks, start: ph, ghost, level, micSrc, analyser,
+               levelBuf: new Uint8Array(analyser.fftSize) };
+  try{ mr.start(); }
+  catch(_){
+    ghost.remove();
+    try{ micSrc.disconnect(); }catch(e2){}
+    stream.getTracks().forEach(t => t.stop());
+    recState = null;
+    showErr("couldn't start recording — check the mic and try again");
+    return;
+  }
   track.slot.classList.add('recording');
   startPlayback();                         // hear the mix while singing
 }
@@ -381,13 +421,29 @@ async function finishRec(){
   const rs = recState;
   recState = null;
   if (!rs) return;
+  rs.ghost.remove();
+  try{ rs.micSrc.disconnect(); }catch(_){}
   rs.stream.getTracks().forEach(t => t.stop());
   rs.track.slot.classList.remove('recording');
+  updateTL();                              // settle any provisional extension
   ph = rs.start; setPlayheadUI();
   try{
     if (!rs.chunks.length) throw new Error('empty');
     const ab = await new Blob(rs.chunks).arrayBuffer();
     const raw = await decode(ab);          // container-agnostic (mp4 on iOS, webm on Chrome)
+    // normalize the take in place so quiet mics feed the DSP a consistent level
+    let pk = 0;
+    for (let ch = 0; ch < raw.numberOfChannels; ch++){
+      const dd = raw.getChannelData(ch);
+      for (let i = 0; i < dd.length; i++){ const v = Math.abs(dd[i]); if (v > pk) pk = v; }
+    }
+    if (pk > 0.001){
+      const gN = 0.95 / pk;
+      for (let ch = 0; ch < raw.numberOfChannels; ch++){
+        const dd = raw.getChannelData(ch);
+        for (let i = 0; i < dd.length; i++) dd[i] *= gN;
+      }
+    }
     const tuned = await window.autotune(raw);
     rs.track.buf = tuned;
     rs.track.start = rs.start;
@@ -409,18 +465,23 @@ function buildGraph(c, dest, from){
   master.connect(lim); lim.connect(dest);
   const srcs = [], t0 = c.currentTime;
   const add = (buf, at, off, gain) => {
-    if (off >= buf.duration) return;
+    if (off >= buf.duration) return null;
     const s = c.createBufferSource(); s.buffer = buf;
     const g = c.createGain(); g.gain.value = gain;
     s.connect(g); g.connect(master);
     s.start(t0 + at, off);
     srcs.push(s);
+    return g;
   };
-  if (backing) add(backing, 0, from, 0.4);
+  if (backing){
+    const g = add(backing, 0, from, backVol);
+    if (c === AC) backGainNode = g;                // live only, not offline renders
+  }
   for (const t of tracks){
     if (!t.buf) continue;
-    if (t.start >= from) add(t.buf, t.start - from, 0, 1.0);
-    else add(t.buf, 0, from - t.start, 1.0);
+    const g = t.start >= from ? add(t.buf, t.start - from, 0, vocVol)
+                              : add(t.buf, 0, from - t.start, vocVol);
+    if (g && c === AC) vocGainNodes.push(g);       // live only, not offline renders
   }
   return srcs;
 }
@@ -436,16 +497,40 @@ function tick(){
   raf = requestAnimationFrame(tick);
   ph = phBase + (AC.currentTime - ctxT0);
   if (!recState && ph >= mixDur()){ ph = mixDur(); stopPlayback(); return; }
+  if (recState){
+    recState.ghost.style.width = Math.max(2, (ph - recState.start) * PPS) + 'px';
+    recState.analyser.getByteTimeDomainData(recState.levelBuf);
+    let peak = 0;
+    for (let i = 0; i < recState.levelBuf.length; i++){
+      const v = Math.abs(recState.levelBuf[i] - 128);
+      if (v > peak) peak = v;
+    }
+    recState.level.style.height = Math.round(peak / 128 * 55) + 'px';
+    if (ph > TL - 5){                      // extend timeline while recording past end
+      TL = Math.ceil(ph + 10);
+      document.documentElement.style.setProperty('--tlw', TL * PPS + 'px');
+    }
+  }
   setPlayheadUI();
 }
 function stopPlayback(){
   cancelAnimationFrame(raf);
   for (const s of liveSrcs){ try{ s.stop(); }catch(_){} }
   liveSrcs = [];
+  backGainNode = null;
+  vocGainNodes = [];
   playing = false;
   $('playBtn').textContent = '▶';
   setPlayheadUI();
 }
+$('backVolSlider').oninput = e => {
+  backVol = e.target.value / 100;
+  if (backGainNode) backGainNode.gain.value = backVol;
+};
+$('vocVolSlider').oninput = e => {
+  vocVol = e.target.value / 100;
+  for (const g of vocGainNodes) g.gain.value = vocVol;
+};
 $('playBtn').onclick = () => {
   ensureCtx();
   if (recState){ stopRec(); return; }
@@ -486,7 +571,8 @@ window.autotune = async function(inBuf){
     for (let n = 0; n < N; n++){ const v = x[o + n]; e += v * v; }
     const rms = Math.sqrt(e / N);
     en[i] = rms;
-    if (rms < 0.005) continue;                           // silence floor
+    const prevV = i > 0 && f0[i - 1] > 0;                // hysteresis: staying voiced
+    if (rms < (prevV ? 0.001 : 0.002)) continue;         // needs less evidence
     let r0 = 0;
     for (let n = 0; n < L; n++){ const v = x[o + n]; r0 += v * v; }
     if (r0 < 1e-9) continue;
@@ -521,15 +607,76 @@ window.autotune = async function(inBuf){
       }
       if (!took) break;
     }
-    if (bl && best / r0 > 0.5) f0[i] = sr / bl;          // voiced
+    // continuity-aware octave choice: consider {bl, bl/2, bl/3, 2bl}, bonus
+    // candidates near the previous frame's pitch (prevents mid-note flips)
+    if (bl){
+      const cands = [{ lag: bl, score: best }];
+      for (const g of [Math.round(bl / 2), Math.round(bl / 3), bl * 2]){
+        if (g < minLag || g > maxLag) continue;
+        let cb = 0, cl = 0;
+        for (let lag = Math.max(minLag, g - 2); lag <= Math.min(maxLag, g + 2); lag++){
+          const s = corr(lag);
+          if (s > cb){ cb = s; cl = lag; }
+        }
+        if (cl && !cands.some(c => Math.abs(c.lag - cl) <= 2)) cands.push({ lag: cl, score: cb });
+      }
+      const prevF = i > 0 ? f0[i - 1] : 0;
+      let eBest = -1, pickL = bl, pickS = best;
+      for (const c of cands){
+        let e = c.score * (c.lag > bl ? 0.95 : 1);        // slight fundamental bias
+        if (prevF > 0 && Math.abs(12 * Math.log2(sr / c.lag / prevF)) <= 6) e *= 1.35;
+        if (e > eBest){ eBest = e; pickL = c.lag; pickS = c.score; }
+      }
+      bl = pickL; best = pickS;
+    }
+    if (bl && best / r0 > (prevV ? 0.38 : 0.5)) f0[i] = sr / bl;   // voiced
   }
 
-  /* 2 — MIDI + light 3-wide median (kills single-frame octave blips) */
+  /* 2 — MIDI + 5-wide median, octave de-glitch, short-gap fill */
+  const f0raw = f0.slice();
   const f = new Float32Array(nF), midi = new Float32Array(nF);
+  const m5 = [];
   for (let i = 0; i < nF; i++){
-    const a = f0[Math.max(0, i - 1)], b = f0[i], c = f0[Math.min(nF - 1, i + 1)];
-    f[i] = Math.max(Math.min(a, b), Math.min(Math.max(a, b), c));
+    m5.length = 0;
+    for (let k = -2; k <= 2; k++) m5.push(f0[Math.min(nF - 1, Math.max(0, i + k))]);
+    m5.sort((a, b) => a - b);
+    f[i] = m5[2];
     midi[i] = f[i] > 0 ? 69 + 12 * Math.log2(f[i] / 440) : 0;
+  }
+  // octave de-glitch: pull ±12/±24 st outliers back toward the recent voiced pitch
+  let lastM = 0, lastIdx = -100;
+  for (let i = 0; i < nF; i++){
+    if (midi[i] <= 0) continue;
+    if (lastM > 0 && i - lastIdx <= 10 && Math.abs(midi[i] - lastM) >= 7){
+      const dir = lastM > midi[i] ? 12 : -12;
+      let fixed = false;
+      for (let k = 1; k <= 2; k++){
+        if (Math.abs(midi[i] + dir * k - lastM) <= 3.5){
+          midi[i] += dir * k;
+          f[i] = 440 * Math.pow(2, (midi[i] - 69) / 12);
+          fixed = true;
+          break;
+        }
+      }
+      // not an octave error: an isolated outlier (blip/sibilance) — drop to unvoiced
+      if (!fixed){ midi[i] = 0; f[i] = 0; continue; }
+    }
+    lastM = midi[i]; lastIdx = i;
+  }
+  // fill unvoiced gaps of <= 6 frames (~32 ms) between voiced neighbours (kills stutter)
+  let gapsFilled = 0;
+  for (let i = 1; i < nF; i++){
+    if (midi[i] > 0 || midi[i - 1] <= 0) continue;
+    let j = i;
+    while (j < nF && midi[j] <= 0) j++;
+    if (j < nF && j - i <= 6){
+      for (let k = i; k < j; k++){
+        midi[k] = midi[i - 1] + (midi[j] - midi[i - 1]) * (k - i + 1) / (j - i + 1);
+        f[k] = 440 * Math.pow(2, (midi[k] - 69) / 12);
+      }
+      gapsFilled++;
+    }
+    i = j;
   }
 
   /* 3 — key auto-detect: energy-weighted pitch-class histogram, best major scale */
@@ -549,9 +696,9 @@ window.autotune = async function(inBuf){
   for (let i = 0; i < nF; i++) if (midi[i] > 0) voiced.push(midi[i]);
   voiced.sort((a, b) => a - b);
   const med = voiced.length ? voiced[voiced.length >> 1] : 60;
-  const ratio = new Float32Array(nF).fill(1);
+  const fTarg = new Float32Array(nF);                    // 0 = unvoiced, pass through
   for (let i = 0; i < nF; i++){
-    if (midi[i] <= 0) continue;                          // unvoiced passes through
+    if (midi[i] <= 0) continue;
     const target = med + 2.0 * (midi[i] - med);
     let note = Math.round(target), bd = 1e9;
     for (let c = Math.floor(target) - 7; c <= Math.ceil(target) + 7; c++){
@@ -559,8 +706,7 @@ window.autotune = async function(inBuf){
       const d = Math.abs(c - target);
       if (d < bd){ bd = d; note = c; }
     }
-    const fT = 440 * Math.pow(2, (note - 69) / 12);
-    ratio[i] = Math.min(2, Math.max(0.5, fT / f[i]));    // instant, zero portamento
+    fTarg[i] = 440 * Math.pow(2, (note - 69) / 12);      // instant, zero portamento
   }
 
   /* 5 — granular overlap-add resynthesis (Hann, 75% overlap, formants shift) */
@@ -568,10 +714,19 @@ window.autotune = async function(inBuf){
   const win = new Float32Array(N);
   for (let n = 0; n < N; n++) win[n] = 0.5 - 0.5 * Math.cos(2 * Math.PI * n / N);
   const half = N / 2;
-  let off = 0;                    // keeps consecutive grains phase-continuous at the
+  let off = 0, clamped = 0;       // keeps consecutive grains phase-continuous at the
   for (let i = 0; i < nF; i++){   // shifted rate so the pitch shift actually lands
-    const o = i * H, ctr = o + half, r = ratio[i];
+    const o = i * H, ctr = o + half;
     if (Math.abs(off) > 1600) off = 0;                   // re-center, masked by overlap
+    // ratio: target from THIS frame, detected pitch from the frame actually read
+    const ri = Math.min(nF - 1, Math.max(0, Math.round((ctr + off - half) / H)));
+    const fD = f[ri] > 0 ? f[ri] : f[i];
+    let r = 1;
+    if (fTarg[i] > 0 && fD > 0){
+      const rr = fTarg[i] / fD;
+      r = Math.min(2, Math.max(0.5, rr));
+      if (rr < 0.5 || rr > 2) clamped++;
+    }
     for (let n = 0; n < N; n++){
       const sp = ctr + off + (n - half) * r;
       const s0 = Math.floor(sp);
@@ -585,10 +740,139 @@ window.autotune = async function(inBuf){
   for (let n = 0; n < x.length; n++)
     out[n] = norm[n] > 1e-4 ? out[n] / norm[n] : x[n];
 
+  let voicedCnt = 0, bigJumps = 0;                       // diagnostics
+  for (let i = 0; i < nF; i++){
+    if (midi[i] <= 0) continue;
+    voicedCnt++;
+    if (i > 0 && midi[i - 1] > 0 && Math.abs(midi[i] - midi[i - 1]) >= 7) bigJumps++;
+  }
+  window.__lastAnalysis = { f0raw, midi, voiced: voicedCnt, bigJumps, clamped, gapsFilled };
+
   const ob = makeBuf(x.length, sr);
   ob.getChannelData(0).set(out);
   return ob;
 };
+
+/* =================== backing section detection ==================== */
+function fft(re, im){                                    // in-place radix-2
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++){
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j){
+      let t = re[i]; re[i] = re[j]; re[j] = t;
+      t = im[i]; im[i] = im[j]; im[j] = t;
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1){
+    const ang = -2 * Math.PI / len, wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len){
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++){
+        const a = i + k, b = a + len / 2;
+        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr; im[b] = im[a] - ti;
+        re[a] += tr; im[a] += ti;
+        const nr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr; cr = nr;
+      }
+    }
+  }
+}
+window.__sections = [];
+async function detectSections(buf){
+  const dur = buf.duration;
+  if (dur < 25) return [];
+  const sr = buf.sampleRate, x = toMono(buf);
+  const F = 4096, hf = F / 2, nW = Math.floor(dur);
+  const hann = new Float32Array(F);
+  for (let n = 0; n < F; n++) hann[n] = 0.5 - 0.5 * Math.cos(2 * Math.PI * n / F);
+  const kLo = Math.max(1, Math.ceil(80 * F / sr));
+  const kHi = Math.min(hf - 1, Math.floor(2000 * F / sr));
+  const re = new Float32Array(F), im = new Float32Array(F);
+  const chromas = [], rms = [];
+  for (let w = 0; w < nW; w++){                          // 1 s windows
+    const c = Math.round((w + 0.5) * sr);
+    let e = 0;
+    for (let n = 0; n < F; n++){
+      const idx = c - hf + n;
+      const v = idx >= 0 && idx < x.length ? x[idx] : 0;
+      re[n] = v * hann[n]; im[n] = 0; e += v * v;
+    }
+    rms.push(Math.sqrt(e / F));
+    fft(re, im);
+    const ch = new Float32Array(12);
+    for (let k = kLo; k <= kHi; k++){
+      const pc = ((Math.round(69 + 12 * Math.log2(k * sr / F / 440)) % 12) + 12) % 12;
+      ch[pc] += Math.hypot(re[k], im[k]);
+    }
+    let n2 = 0;
+    for (let p = 0; p < 12; p++) n2 += ch[p] * ch[p];
+    n2 = Math.sqrt(n2) || 1;
+    for (let p = 0; p < 12; p++) ch[p] /= n2;
+    chromas.push(ch);
+    if ((w & 31) === 31) await new Promise(r => setTimeout(r));  // keep UI responsive
+  }
+  const maxR = Math.max(...rms) || 1;
+  const nov = [0];                                       // novelty curve
+  for (let i = 1; i < nW; i++){
+    let dot = 0;
+    for (let p = 0; p < 12; p++) dot += chromas[i - 1][p] * chromas[i][p];
+    nov.push((1 - dot) + 2 * Math.abs(rms[i] - rms[i - 1]) / maxR);
+  }
+  const sm = nov.map((_, i) =>
+    (nov[Math.max(0, i - 1)] + nov[i] + nov[Math.min(nW - 1, i + 1)]) / 3);
+  const thr = [...sm].sort((a, b) => a - b)[Math.floor(sm.length * 0.6)];
+  const cand = [];
+  for (let i = 1; i < nW - 1; i++)
+    if (sm[i] > thr && sm[i] >= sm[i - 1] && sm[i] >= sm[i + 1]) cand.push(i);
+  cand.sort((a, b) => sm[b] - sm[a]);
+  const bounds = [0];
+  for (const c of cand){
+    if (bounds.length >= 12) break;
+    if (bounds.every(b => Math.abs(b - c) >= 8)) bounds.push(c);
+  }
+  bounds.sort((a, b) => a - b);
+  while (bounds.length > 1 && dur - bounds[bounds.length - 1] < 5) bounds.pop();
+  const secs = bounds.map((b, i) => {                    // per-section stats
+    const end = i + 1 < bounds.length ? bounds[i + 1] : nW;
+    const mc = new Float32Array(12);
+    let mr = 0, cnt = 0;
+    for (let w = b; w < end; w++){
+      for (let p = 0; p < 12; p++) mc[p] += chromas[w][p];
+      mr += rms[w]; cnt++;
+    }
+    cnt = cnt || 1;
+    for (let p = 0; p < 12; p++) mc[p] /= cnt;
+    return { start: b, mc, mr: mr / cnt };
+  });
+  let star = 0, bs = -1;                                 // chorus = loud + repeated
+  for (let i = 0; i < secs.length; i++){
+    let sim = 0;
+    for (let j = 0; j < secs.length; j++){
+      if (j === i) continue;
+      let d = 0;
+      for (let p = 0; p < 12; p++) d += secs[i].mc[p] * secs[j].mc[p];
+      sim += d;
+    }
+    if (secs.length > 1) sim /= secs.length - 1;
+    const sc = secs[i].mr / maxR + sim;
+    if (sc > bs){ bs = sc; star = i; }
+  }
+  return secs.map((s, i) => ({ start: s.start, isChorus: i === star }));
+}
+function renderSections(){
+  backLane.querySelectorAll('.secchip').forEach(e => e.remove());
+  window.__sections.forEach((s, i) => {
+    const b = document.createElement('button');
+    b.className = 'secchip';
+    b.style.left = s.start * PPS + 'px';
+    b.textContent = (s.isChorus ? '★' : '') + (i + 1);
+    b.onclick = () => seekTo(s.start);
+    backLane.appendChild(b);
+  });
+}
 
 /* ====================== offline mixdown + save ==================== */
 window.__mixdown = async function(){
