@@ -95,19 +95,20 @@
 
   /* transport */
   #transport{
-    flex:none; display:flex; align-items:center; justify-content:center; gap:18px;
-    padding:10px 16px calc(10px + env(safe-area-inset-bottom));
+    flex:none; display:flex; flex-direction:column; align-items:center; gap:8px;
+    padding:8px 10px calc(8px + env(safe-area-inset-bottom));
     border-top:1px solid var(--line); background:#111116;
   }
+  .tline{display:flex; align-items:center; justify-content:center; gap:12px; width:100%;}
   #playBtn{
-    width:62px; height:62px; border-radius:50%; border:none; cursor:pointer;
+    flex:none; width:62px; height:62px; border-radius:50%; border:none; cursor:pointer;
     background:var(--ink); color:#111; font-size:24px;
   }
-  #saveBtn{
-    background:#22222b; color:var(--ink); border:1px solid #33333e; cursor:pointer;
-    border-radius:10px; padding:12px 22px; font-size:15px;
+  #saveBtn,#vidBtn{
+    flex:none; background:#22222b; color:var(--ink); border:1px solid #33333e; cursor:pointer;
+    border-radius:10px; padding:12px 16px; font-size:15px; white-space:nowrap;
   }
-  #saveBtn:disabled{opacity:.4;}
+  #saveBtn:disabled,#vidBtn:disabled,#playBtn:disabled{opacity:.4;}
   #phTime{font-size:12px; color:var(--dim); min-width:44px; font-variant-numeric:tabular-nums;}
   #backVolWrap{display:flex; align-items:center; gap:6px; color:var(--orange); font-size:14px;}
   #backVolSlider{width:90px; accent-color:var(--orange);}
@@ -132,11 +133,16 @@
 </div>
 
 <div id="transport">
-  <span id="phTime">0.0s</span>
-  <span id="backVolWrap">♫<input type="range" id="backVolSlider" min="0" max="120" value="40" aria-label="backing track volume"></span>
-  <span id="vocVolWrap">🎤<input type="range" id="vocVolSlider" min="0" max="200" value="100" aria-label="vocal volume"></span>
-  <button id="playBtn" aria-label="play">▶</button>
-  <button id="saveBtn">Save</button>
+  <div class="tline">
+    <span id="backVolWrap">♫<input type="range" id="backVolSlider" min="0" max="120" value="40" aria-label="backing track volume"></span>
+    <span id="vocVolWrap">🎤<input type="range" id="vocVolSlider" min="0" max="200" value="100" aria-label="vocal volume"></span>
+  </div>
+  <div class="tline">
+    <span id="phTime">0.0s</span>
+    <button id="playBtn" aria-label="play">▶</button>
+    <button id="saveBtn">Save</button>
+    <button id="vidBtn">🎬 Video</button>
+  </div>
 </div>
 
 <input type="file" id="backFile" accept="audio/*" hidden>
@@ -395,6 +401,7 @@ function renderClip(t){
 
 /* =========================== recording ============================ */
 async function startRec(track){
+  if (exporting) return;                   // no recording while a video renders
   const c = ensureCtx();
   if (playing) stopPlayback();
   let stream;
@@ -741,15 +748,22 @@ window.autotune = async function(inBuf){
     return note;
   };
   const tNote = new Int16Array(nF);
+  let prevNote = 0, prevNoteIdx = -100;                  // note-switch hysteresis
   for (let i = 0; i < nF; i++){
     if (midi[i] <= 0) continue;
-    const target = med + 2.0 * (midi[i] - med);
+    if (i - prevNoteIdx > 7) prevNote = 0;               // genuinely new phrase: reset
+    let target = med + 2.0 * (midi[i] - med);
     let note = nearestScale(target);                     // instant, zero portamento
     if (Math.abs(note - midi[i]) > 12){                  // cap the shift but stay on-grid
-      note = nearestScale(midi[i] + (note > midi[i] ? 12 : -12));
+      target = midi[i] + (note > midi[i] ? 12 : -12);
+      note = nearestScale(target);
       clamped++;
     }
+    // note-switch hysteresis: hold the chosen note through vibrato-scale wobble;
+    // a deliberate move (>= 1 st detected = 2 st in target space) still switches
+    if (prevNote && Math.abs(target - prevNote) < 1.35) note = prevNote;
     tNote[i] = note;
+    prevNote = note; prevNoteIdx = i;
     fTarg[i] = 440 * Math.pow(2, (note - 69) / 12);
   }
 
@@ -988,6 +1002,192 @@ $('saveBtn').onclick = async () => {
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   }catch(_){ showErr("couldn't export the mix — try again"); }
   btn.disabled = false;
+};
+
+/* ========================== video export ========================== */
+let exporting = null;                                    // {rec, srcs, raf, timer, done}
+const VW = 1080, VH = 1920, COLW = 170, VROWH = 150, VPPS = 110;
+function vRoundRect(g, x, y, w, h, r){
+  r = Math.min(r, w / 2, h / 2);
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r);
+  g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r);
+  g.arcTo(x, y, x + w, y, r);
+  g.closePath();
+}
+function vPeakStrip(g, p, x0, y, w, h, color){           // draw from precomputed bins
+  g.fillStyle = color;
+  const xa = Math.max(Math.ceil(x0), COLW), xb = Math.min(x0 + w, VW);
+  for (let x = xa; x < xb; x += 3){
+    const b = Math.min(p.length - 1, Math.floor((x - x0) / w * p.length));
+    const amp = Math.max(2, p[b] * h * 0.48);
+    g.fillRect(x, y + h / 2 - amp, 2, amp * 2);
+  }
+}
+function drawExportFrame(g, t, rows, imgs, peaks){
+  g.fillStyle = '#0d0d10'; g.fillRect(0, 0, VW, VH);
+  g.textAlign = 'center';
+  g.fillStyle = '#e8e8ee'; g.font = 'bold 64px sans-serif';
+  g.fillText('AutoTune Trend', VW / 2, 170);
+  g.fillStyle = '#8a8a96'; g.font = '36px sans-serif';
+  g.fillText('sing badly. sound iconic.', VW / 2, 230);
+  const topY = Math.max(340, (VH - rows.length * VROWH) / 2);
+  const laneW = VW - COLW;
+  const phX = COLW + laneW * 0.42;
+  const originX = phX - t * VPPS;                        // x of timeline t=0
+  g.save();
+  g.beginPath(); g.rect(COLW, topY - 70, laneW, 70 + rows.length * VROWH); g.clip();
+  g.textAlign = 'left'; g.font = '28px sans-serif';      // scrolling ruler
+  for (let s = Math.max(0, Math.floor(t - phX / VPPS)); s <= Math.ceil(t + (VW - phX) / VPPS); s++){
+    const x = originX + s * VPPS;
+    g.fillStyle = '#4a4a58'; g.fillRect(x, topY - 22, 2, 22);
+    g.fillStyle = '#8a8a96'; g.fillText(String(s), x + 8, topY - 34);
+  }
+  rows.forEach((r, ri) => {
+    const y = topY + ri * VROWH;
+    g.fillStyle = '#1d1d24'; g.fillRect(COLW, y + VROWH - 2, laneW, 2);
+    if (r.type === 'back'){
+      vPeakStrip(g, peaks.get(backing), originX, y + 12, backing.duration * VPPS, VROWH - 24, '#ff7a1a');
+    } else {
+      const tr = r.t, x0 = originX + tr.start * VPPS, w = tr.buf.duration * VPPS;
+      g.fillStyle = tr.color + '30'; g.strokeStyle = tr.color; g.lineWidth = 3;
+      vRoundRect(g, x0, y + 12, w, VROWH - 24, 20); g.fill(); g.stroke();
+      vPeakStrip(g, peaks.get(tr.buf), x0, y + 18, w, VROWH - 36, lighten(tr.color, 0.45));
+    }
+  });
+  g.restore();
+  g.shadowColor = 'rgba(255,255,255,.7)'; g.shadowBlur = 16;  // fixed playhead
+  g.fillStyle = '#fff'; g.fillRect(phX - 1.5, topY - 50, 3, rows.length * VROWH + 50);
+  g.shadowBlur = 0;
+  rows.forEach((r, ri) => {                              // static left column
+    const cx = COLW / 2, cy = topY + ri * VROWH + VROWH / 2, rad = 52;
+    g.beginPath(); g.arc(cx, cy, rad, 0, 7);
+    if (r.type === 'back'){
+      g.strokeStyle = '#ff7a1a'; g.lineWidth = 5; g.stroke();
+      g.fillStyle = '#ff7a1a'; g.font = '52px sans-serif'; g.textAlign = 'center';
+      g.fillText('♫', cx, cy + 18);
+    } else if (imgs.has(r.t)){
+      g.save(); g.clip();
+      g.drawImage(imgs.get(r.t), cx - rad, cy - rad, rad * 2, rad * 2);
+      g.restore();
+      g.strokeStyle = '#2a2a33'; g.lineWidth = 4; g.stroke();
+    } else {
+      g.strokeStyle = '#2a2a33'; g.lineWidth = 4; g.stroke();
+      g.fillStyle = '#ff3b3b'; g.beginPath(); g.arc(cx, cy, 20, 0, 7); g.fill();
+    }
+  });
+}
+async function startExport(){
+  if (mixDur() <= 0){ showErr('nothing to save yet — record something first'); return; }
+  const c = ensureCtx();
+  const cv = document.createElement('canvas');
+  cv.width = VW; cv.height = VH;
+  if (!cv.captureStream || typeof MediaRecorder === 'undefined'){
+    showErr("video export isn't supported in this browser — screen-record your phone instead");
+    return;
+  }
+  const g = cv.getContext('2d');
+  const rows = [];
+  if (backing) rows.push({ type: 'back' });
+  for (const t of tracks) if (t.buf) rows.push({ type: 'voc', t });
+  const imgs = new Map();                                // preload face photos
+  await Promise.all(tracks.filter(t => t.buf && t.img).map(t => new Promise(res => {
+    const im = new Image();
+    im.onload = () => { imgs.set(t, im); res(); };
+    im.onerror = () => res();
+    im.src = t.img;
+  })));
+  const peaks = new Map();                               // 10 ms peak bins per buffer
+  const mkPeaks = buf => {
+    const d = buf.getChannelData(0), bl = Math.max(1, Math.round(buf.sampleRate * 0.01));
+    const p = new Float32Array(Math.ceil(d.length / bl));
+    for (let b = 0; b < p.length; b++){
+      let m = 0;
+      const a0 = b * bl, a1 = Math.min(d.length, a0 + bl), st = Math.max(1, (a1 - a0) >> 5);
+      for (let i = a0; i < a1; i += st){ const v = Math.abs(d[i]); if (v > m) m = v; }
+      p[b] = m;
+    }
+    return p;
+  };
+  if (backing) peaks.set(backing, mkPeaks(backing));
+  for (const t of tracks) if (t.buf) peaks.set(t.buf, mkPeaks(t.buf));
+  const dur = Math.min(mixDur(), window.__exportCap || Infinity);
+  const msDest = c.createMediaStreamDestination();       // audible + captured
+  const fan = c.createGain();
+  fan.connect(c.destination); fan.connect(msDest);
+  const stream = new MediaStream([
+    ...cv.captureStream(30).getVideoTracks(),
+    ...msDest.stream.getAudioTracks()
+  ]);
+  const mime = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4;codecs=avc1',
+    'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm']
+    .find(m => MediaRecorder.isTypeSupported(m));
+  if (!mime){
+    showErr("video export isn't supported in this browser — screen-record your phone instead");
+    return;
+  }
+  let rec;
+  try{ rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 6e6 }); }
+  catch(_){
+    showErr("video export isn't supported in this browser — screen-record your phone instead");
+    return;
+  }
+  const chunks = [];
+  rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  rec.onstop = () => {
+    const cancelled = exporting && exporting.cancelled;
+    if (!cancelled && chunks.length){
+      const ext = mime.startsWith('video/mp4') ? 'mp4' : 'webm';
+      const blob = new Blob(chunks, { type: mime });
+      window.__lastExport = { size: blob.size, mime };
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'autotune-trend.' + ext;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    }
+    exporting = null;
+    $('vidBtn').textContent = '🎬 Video';
+    $('playBtn').disabled = false; $('saveBtn').disabled = false;
+  };
+  if (playing) stopPlayback();
+  const srcs = buildGraph(c, fan, 0);                    // own graph and clock —
+  const t0c = c.currentTime;                             // normal playhead untouched
+  exporting = { rec, srcs, raf: 0, timer: 0, done: false, cancelled: false };
+  rec.start(250);
+  $('playBtn').disabled = true; $('saveBtn').disabled = true;
+  exporting.timer = setTimeout(() => stopExport(false), (dur + 0.4) * 1000);
+  const draw = () => {
+    if (!exporting || exporting.rec !== rec) return;
+    const t = Math.min(dur, c.currentTime - t0c);
+    drawExportFrame(g, t, rows, imgs, peaks);
+    $('vidBtn').textContent = '🎬 ' + Math.round(t / dur * 100) + '%';
+    if (c.currentTime - t0c >= dur){ stopExport(false); return; }  // audio clock ends it
+    exporting.raf = requestAnimationFrame(draw);
+  };
+  draw();
+}
+function stopExport(cancel){
+  const ex = exporting;
+  if (!ex || ex.done) return;
+  ex.done = true; ex.cancelled = cancel;
+  cancelAnimationFrame(ex.raf);
+  clearTimeout(ex.timer);
+  for (const s of ex.srcs){ try{ s.stop(); }catch(_){} }
+  try{ ex.rec.stop(); }
+  catch(_){
+    exporting = null;
+    $('vidBtn').textContent = '🎬 Video';
+    $('playBtn').disabled = false; $('saveBtn').disabled = false;
+  }
+}
+$('vidBtn').onclick = () => {
+  ensureCtx();
+  if (exporting){ stopExport(true); return; }            // tap mid-render = cancel
+  if (recState) return;
+  startExport();
 };
 
 /* ============================== init ============================== */
