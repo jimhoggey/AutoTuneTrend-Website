@@ -1,0 +1,643 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>AutoTune Trend</title>
+<style>
+  :root{
+    --bg:#0d0d10; --line:#1d1d24; --ink:#e8e8ee; --dim:#8a8a96;
+    --orange:#ff7a1a; --red:#ff3b3b;
+    --slotw:84px; --rowh:64px; --pps:20; --tlw:600px;
+  }
+  *{box-sizing:border-box; margin:0; -webkit-tap-highlight-color:transparent;}
+  html,body{height:100%;}
+  body{
+    background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    display:flex; flex-direction:column; height:100dvh; overflow:hidden;
+    touch-action:manipulation; user-select:none; -webkit-user-select:none;
+  }
+  header{padding:10px 14px 6px; flex:none;}
+  header h1{font-size:17px; font-weight:700; letter-spacing:.5px;}
+  header p{font-size:12px; color:var(--dim);}
+  #err{
+    display:none; margin:6px 14px 0; padding:8px 12px; border-radius:8px;
+    background:#3a1518; color:#ffb4b4; font-size:13px; flex:none;
+  }
+  #scroller{flex:1; overflow:auto; position:relative; overscroll-behavior:contain;}
+  #content{position:relative; width:max-content; min-width:100%;}
+
+  /* timeline ruler */
+  #ruler{
+    position:relative; height:22px; margin-left:var(--slotw); width:var(--tlw);
+    border-bottom:1px solid var(--line); cursor:pointer;
+  }
+  #ruler .tick{position:absolute; bottom:0; width:1px; height:6px; background:#333340;}
+  #ruler .tick.maj{height:11px; background:#4a4a58;}
+  #ruler .num{position:absolute; top:1px; font-size:9px; color:var(--dim); transform:translateX(2px);}
+
+  /* track rows */
+  .row{display:flex; height:var(--rowh); border-bottom:1px solid var(--line);}
+  .slotcol{
+    position:sticky; left:0; z-index:3; flex:none; width:var(--slotw);
+    display:flex; align-items:center; gap:5px; padding-left:8px;
+    background:var(--bg); border-right:1px solid var(--line);
+  }
+  .slot{
+    width:56px; height:56px; flex:none; border-radius:50%; border:2px solid #2a2a33;
+    background:#16161c; color:var(--ink); padding:0; overflow:hidden;
+    display:flex; align-items:center; justify-content:center; font-size:20px; cursor:pointer;
+  }
+  .slot img{width:100%; height:100%; object-fit:cover; pointer-events:none;}
+  .slot .dot{width:22px; height:22px; border-radius:50%; background:var(--red); pointer-events:none;}
+  .slot.recording{border-color:var(--red); animation:pulse .9s ease-in-out infinite;}
+  .slot.recording .dot{border-radius:5px;}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,59,59,.55);}50%{box-shadow:0 0 0 9px rgba(255,59,59,0);}}
+  .mini{display:none; flex-direction:column; gap:6px;}
+  .row.hastake .mini{display:flex;}
+  .mini button{
+    width:18px; height:18px; border-radius:50%; border:none; padding:0; cursor:pointer;
+    background:#26262e; color:var(--dim); font-size:9px; line-height:18px;
+  }
+  .mini .rerec{color:var(--red);}
+  .bslot{border-color:#4a2a10; color:var(--orange); font-size:22px;}
+
+  .lane{position:relative; flex:none; width:var(--tlw); overflow:hidden;}
+  .addback{
+    position:absolute; left:8px; top:50%; transform:translateY(-50%);
+    background:none; border:1px dashed #4a2a10; color:var(--orange);
+    border-radius:8px; padding:8px 14px; font-size:13px; cursor:pointer;
+  }
+  .lane canvas.backwave{position:absolute; left:0; top:4px;}
+
+  .clip{
+    position:absolute; top:4px; height:calc(var(--rowh) - 9px); border-radius:8px;
+    overflow:hidden; cursor:grab; touch-action:none; border:1px solid;
+  }
+  .clip canvas{display:block;}
+
+  #playhead{
+    position:absolute; top:0; bottom:0; width:2px; background:#fff; z-index:2;
+    pointer-events:none; box-shadow:0 0 6px rgba(255,255,255,.6);
+  }
+
+  .addrow{display:flex; height:44px; align-items:center;}
+  #addTrack{
+    position:sticky; left:8px; margin-left:8px; background:none; border:1px dashed #33333e;
+    color:var(--dim); border-radius:8px; padding:6px 14px; font-size:13px; cursor:pointer;
+  }
+
+  /* transport */
+  #transport{
+    flex:none; display:flex; align-items:center; justify-content:center; gap:18px;
+    padding:10px 16px calc(10px + env(safe-area-inset-bottom));
+    border-top:1px solid var(--line); background:#111116;
+  }
+  #playBtn{
+    width:62px; height:62px; border-radius:50%; border:none; cursor:pointer;
+    background:var(--ink); color:#111; font-size:24px;
+  }
+  #saveBtn{
+    background:#22222b; color:var(--ink); border:1px solid #33333e; cursor:pointer;
+    border-radius:10px; padding:12px 22px; font-size:15px;
+  }
+  #saveBtn:disabled{opacity:.4;}
+  #phTime{font-size:12px; color:var(--dim); min-width:44px; font-variant-numeric:tabular-nums;}
+</style>
+</head>
+<body>
+<header>
+  <h1>AutoTune Trend</h1>
+  <p>sing badly. sound iconic. &nbsp;·&nbsp; 🎧 headphones recommended</p>
+</header>
+<div id="err"></div>
+
+<div id="scroller">
+  <div id="content">
+    <div id="ruler"></div>
+    <div id="rows"></div>
+    <div class="addrow"><button id="addTrack">＋ add track</button></div>
+    <div id="playhead"></div>
+  </div>
+</div>
+
+<div id="transport">
+  <span id="phTime">0.0s</span>
+  <button id="playBtn" aria-label="play">▶</button>
+  <button id="saveBtn">Save</button>
+</div>
+
+<input type="file" id="backFile" accept="audio/*" hidden>
+<input type="file" id="faceFile" accept="image/*" capture="user" hidden>
+
+<script>
+'use strict';
+/* ============================== state ============================== */
+const PPS = 20;                 // pixels per second (fixed zoom)
+const SLOT_W = 84;
+const COLORS = ['#2ecc71','#a55eea','#22d3ee','#ffd93d','#ff6b81','#5eead4','#f4a261','#93c5fd'];
+const $ = id => document.getElementById(id);
+
+let AC = null;                  // shared AudioContext (created inside a tap)
+let backing = null;             // AudioBuffer for the backing track
+let tracks = [];                // {row, slot, lane, buf, start, color, img, clipEl}
+let TL = 30;                    // timeline length in seconds
+let ph = 0;                     // playhead position (seconds)
+let playing = false, liveSrcs = [], phBase = 0, ctxT0 = 0, raf = 0;
+let recState = null;            // {track, mr, stream, chunks, start}
+let faceTarget = null;
+
+function ensureCtx(){
+  if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+  if (AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function showErr(msg){
+  const e = $('err');
+  e.textContent = msg; e.style.display = 'block';
+  clearTimeout(showErr.t);
+  showErr.t = setTimeout(() => e.style.display = 'none', 5000);
+}
+function mixDur(){
+  let d = backing ? backing.duration : 0;
+  for (const t of tracks) if (t.buf) d = Math.max(d, t.start + t.buf.duration);
+  return d;
+}
+
+/* ============================ timeline ============================= */
+function updateTL(){
+  TL = Math.ceil(Math.max(30, mixDur()));
+  document.documentElement.style.setProperty('--tlw', TL * PPS + 'px');
+  const r = $('ruler');
+  let html = '';
+  for (let s = 0; s <= TL; s++){
+    const maj = s % 5 === 0;
+    html += `<div class="tick${maj ? ' maj' : ''}" style="left:${s * PPS}px"></div>`;
+    if (maj) html += `<div class="num" style="left:${s * PPS}px">${s}</div>`;
+  }
+  r.innerHTML = html;
+  if (backing) drawBacking();
+}
+function setPlayheadUI(){
+  $('playhead').style.left = (SLOT_W + ph * PPS) + 'px';
+  $('phTime').textContent = ph.toFixed(1) + 's';
+}
+function seekTo(t){
+  if (recState) return;
+  t = Math.max(0, Math.min(TL, t));
+  const wasPlaying = playing;
+  if (playing) stopPlayback();
+  ph = t; setPlayheadUI();
+  if (wasPlaying) startPlayback();
+}
+$('ruler').addEventListener('click', e => {
+  seekTo((e.clientX - $('ruler').getBoundingClientRect().left) / PPS);
+});
+
+/* =========================== waveforms ============================ */
+function lighten(hex, amt){          // mix a hex color toward white
+  const n = parseInt(hex.slice(1), 16);
+  const c = i => Math.round(((n >> i) & 255) + (255 - ((n >> i) & 255)) * amt);
+  return `rgb(${c(16)},${c(8)},${c(0)})`;
+}
+function drawWave(cv, data, color, wPx, hPx){
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = Math.max(1, Math.round(wPx * dpr));
+  cv.height = Math.round(hPx * dpr);
+  cv.style.width = wPx + 'px'; cv.style.height = hPx + 'px';
+  const g = cv.getContext('2d');
+  g.scale(dpr, dpr); g.fillStyle = color;
+  const spp = data.length / wPx;
+  for (let px = 0; px < wPx; px++){
+    const a = Math.floor(px * spp), b = Math.min(data.length, Math.ceil((px + 1) * spp));
+    const st = Math.max(1, Math.floor((b - a) / 32));
+    let m = 0;
+    for (let i = a; i < b; i += st){ const v = Math.abs(data[i]); if (v > m) m = v; }
+    const amp = Math.max(0.6, m * (hPx / 2) * 0.95);
+    g.fillRect(px, hPx / 2 - amp, 1, amp * 2);
+  }
+}
+
+/* ========================= backing track ========================== */
+const backRow = document.createElement('div');
+backRow.className = 'row';
+backRow.innerHTML = `
+  <div class="slotcol"><button class="slot bslot" aria-label="backing track">♫</button></div>
+  <div class="lane"><button class="addback">＋ add backing track</button></div>`;
+$('rows').appendChild(backRow);
+const backLane = backRow.querySelector('.lane');
+backRow.querySelector('.addback').onclick = () => $('backFile').click();
+backRow.querySelector('.bslot').onclick = () => $('backFile').click();
+
+$('backFile').onchange = async e => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  try{
+    if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+    const ab = await f.arrayBuffer();
+    backing = await decode(ab);
+    backLane.querySelector('.addback').style.display = 'none';
+    updateTL();
+  }catch(_){ showErr("couldn't read that audio file — try a different one"); }
+};
+function drawBacking(){
+  let cv = backLane.querySelector('.backwave');
+  if (!cv){
+    cv = document.createElement('canvas');
+    cv.className = 'backwave';
+    backLane.appendChild(cv);
+  }
+  drawWave(cv, toMono(backing), getComputedStyle(document.documentElement)
+    .getPropertyValue('--orange').trim() || '#ff7a1a',
+    Math.round(backing.duration * PPS), 55);
+}
+const decode = ab => new Promise((res, rej) => AC.decodeAudioData(ab, res, rej));
+
+/* ========================== vocal tracks ========================== */
+function makeTrack(){
+  const color = COLORS[tracks.length % COLORS.length];
+  const row = document.createElement('div');
+  row.className = 'row vocal';
+  row.innerHTML = `
+    <div class="slotcol">
+      <button class="slot"><span class="dot"></span></button>
+      <div class="mini">
+        <button class="rerec" title="re-record">●</button>
+        <button class="del" title="delete">✕</button>
+      </div>
+    </div>
+    <div class="lane"></div>`;
+  $('rows').appendChild(row);
+  const t = { row, slot: row.querySelector('.slot'), lane: row.querySelector('.lane'),
+              buf: null, start: 0, color, img: null, clipEl: null };
+  t.slot.onclick = () => {
+    ensureCtx();
+    if (recState){ if (recState.track === t) stopRec(); return; }
+    if (t.buf){ faceTarget = t; $('faceFile').click(); }
+    else startRec(t);
+  };
+  row.querySelector('.rerec').onclick = () => {
+    ensureCtx();
+    if (recState) return;
+    clearClip(t); startRec(t);
+  };
+  row.querySelector('.del').onclick = () => { if (!recState) clearClip(t); };
+  tracks.push(t);
+  return t;
+}
+function clearClip(t){
+  if (t.clipEl) t.clipEl.remove();
+  t.clipEl = null; t.buf = null; t.img = null;
+  setTrackUI(t); updateTL();
+}
+function setTrackUI(t){
+  t.row.classList.toggle('hastake', !!t.buf);
+  if (t.buf){
+    t.slot.innerHTML = t.img ? `<img src="${t.img}" alt="face">` : '📷';
+  } else {
+    t.slot.innerHTML = '<span class="dot"></span>';
+  }
+}
+$('faceFile').onchange = e => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (f && faceTarget){ faceTarget.img = URL.createObjectURL(f); setTrackUI(faceTarget); }
+  faceTarget = null;
+};
+$('addTrack').onclick = () => makeTrack();
+for (let i = 0; i < 4; i++) makeTrack();
+
+function renderClip(t){
+  if (t.clipEl) t.clipEl.remove();
+  const el = document.createElement('div');
+  el.className = 'clip';
+  const w = Math.max(8, Math.round(t.buf.duration * PPS));
+  el.style.left = t.start * PPS + 'px';
+  el.style.width = w + 'px';
+  el.style.background = t.color + '30';
+  el.style.borderColor = t.color + '80';
+  const cv = document.createElement('canvas');
+  el.appendChild(cv);
+  drawWave(cv, t.buf.getChannelData(0), lighten(t.color, 0.45), w, 54);
+  t.lane.appendChild(el);
+  t.clipEl = el;
+
+  el.addEventListener('pointerdown', e => {           // horizontal drag to nudge
+    if (recState) return;
+    e.preventDefault();
+    el.setPointerCapture(e.pointerId);
+    const x0 = e.clientX, left0 = t.start * PPS;
+    const move = ev => {
+      const nl = Math.max(0, Math.min(TL * PPS - w, left0 + ev.clientX - x0));
+      el.style.left = nl + 'px';
+      t.start = nl / PPS;
+    };
+    const up = () => {
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', up);
+      updateTL();
+    };
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', up);
+  });
+}
+
+/* =========================== recording ============================ */
+async function startRec(track){
+  const c = ensureCtx();
+  if (playing) stopPlayback();
+  let stream;
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: false, autoGainControl: true }
+    });
+  }catch(_){
+    showErr('mic access needed — allow the microphone and tap record again');
+    return;
+  }
+  let mr;
+  try{ mr = new MediaRecorder(stream); }
+  catch(_){
+    stream.getTracks().forEach(t => t.stop());
+    showErr("recording isn't supported in this browser");
+    return;
+  }
+  const chunks = [];
+  mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  mr.onstop = finishRec;
+  recState = { track, mr, stream, chunks, start: ph };
+  mr.start();
+  track.slot.classList.add('recording');
+  startPlayback();                         // hear the mix while singing
+}
+function stopRec(){
+  if (!recState) return;
+  stopPlayback();
+  try{ recState.mr.stop(); }catch(_){ finishRec(); }
+}
+async function finishRec(){
+  const rs = recState;
+  recState = null;
+  if (!rs) return;
+  rs.stream.getTracks().forEach(t => t.stop());
+  rs.track.slot.classList.remove('recording');
+  ph = rs.start; setPlayheadUI();
+  try{
+    if (!rs.chunks.length) throw new Error('empty');
+    const ab = await new Blob(rs.chunks).arrayBuffer();
+    const raw = await decode(ab);          // container-agnostic (mp4 on iOS, webm on Chrome)
+    const tuned = await window.autotune(raw);
+    rs.track.buf = tuned;
+    rs.track.start = rs.start;
+    setTrackUI(rs.track);
+    updateTL();
+    renderClip(rs.track);
+  }catch(_){
+    showErr("couldn't process that take — try recording again");
+  }
+}
+
+/* ====================== playback / mix graph ====================== */
+function buildGraph(c, dest, from){
+  const master = c.createGain();
+  master.gain.value = 0.9;
+  const lim = c.createDynamicsCompressor();      // soft limiter
+  lim.threshold.value = -10; lim.knee.value = 4; lim.ratio.value = 20;
+  lim.attack.value = 0.003; lim.release.value = 0.25;
+  master.connect(lim); lim.connect(dest);
+  const srcs = [], t0 = c.currentTime;
+  const add = (buf, at, off, gain) => {
+    if (off >= buf.duration) return;
+    const s = c.createBufferSource(); s.buffer = buf;
+    const g = c.createGain(); g.gain.value = gain;
+    s.connect(g); g.connect(master);
+    s.start(t0 + at, off);
+    srcs.push(s);
+  };
+  if (backing) add(backing, 0, from, 0.4);
+  for (const t of tracks){
+    if (!t.buf) continue;
+    if (t.start >= from) add(t.buf, t.start - from, 0, 1.0);
+    else add(t.buf, 0, from - t.start, 1.0);
+  }
+  return srcs;
+}
+function startPlayback(){
+  const c = ensureCtx();
+  liveSrcs = buildGraph(c, c.destination, ph);
+  playing = true; phBase = ph; ctxT0 = c.currentTime;
+  $('playBtn').textContent = '■';
+  cancelAnimationFrame(raf);
+  tick();
+}
+function tick(){
+  raf = requestAnimationFrame(tick);
+  ph = phBase + (AC.currentTime - ctxT0);
+  if (!recState && ph >= mixDur()){ ph = mixDur(); stopPlayback(); return; }
+  setPlayheadUI();
+}
+function stopPlayback(){
+  cancelAnimationFrame(raf);
+  for (const s of liveSrcs){ try{ s.stop(); }catch(_){} }
+  liveSrcs = [];
+  playing = false;
+  $('playBtn').textContent = '▶';
+  setPlayheadUI();
+}
+$('playBtn').onclick = () => {
+  ensureCtx();
+  if (recState){ stopRec(); return; }
+  if (playing){ stopPlayback(); return; }
+  if (mixDur() <= 0){ showErr('add a backing track or record a take first'); return; }
+  if (ph >= mixDur()) ph = 0;
+  startPlayback();
+};
+
+/* ========================= autotune DSP =========================== */
+function toMono(buf){
+  if (buf.numberOfChannels === 1) return buf.getChannelData(0);
+  const out = new Float32Array(buf.length), n = buf.numberOfChannels;
+  for (let ch = 0; ch < n; ch++){
+    const d = buf.getChannelData(ch);
+    for (let i = 0; i < d.length; i++) out[i] += d[i] / n;
+  }
+  return out;
+}
+function makeBuf(len, sr){
+  return (AC || new OfflineAudioContext(1, 1, 44100)).createBuffer(1, len, sr);
+}
+const MAJOR = [0, 2, 4, 5, 7, 9, 11];
+
+window.autotune = async function(inBuf){
+  const sr = inBuf.sampleRate, x = toMono(inBuf);
+  const N = 1024, H = 256;
+  const nF = Math.max(1, Math.floor((x.length - N) / H) + 1);
+  const minLag = Math.max(2, Math.floor(sr / 800));
+  const maxLag = Math.min(N - 2, Math.ceil(sr / 70));
+  const L = N - maxLag;                                  // correlation window
+
+  /* 1 — pitch detection: normalized autocorrelation per frame */
+  const f0 = new Float32Array(nF), en = new Float32Array(nF);
+  for (let i = 0; i < nF; i++){
+    const o = i * H;
+    let e = 0;
+    for (let n = 0; n < N; n++){ const v = x[o + n]; e += v * v; }
+    const rms = Math.sqrt(e / N);
+    en[i] = rms;
+    if (rms < 0.005) continue;                           // silence floor
+    let r0 = 0;
+    for (let n = 0; n < L; n++){ const v = x[o + n]; r0 += v * v; }
+    if (r0 < 1e-9) continue;
+    const corr = lag => {
+      let s = 0;
+      for (let n = 0; n < L; n++) s += x[o + n] * x[o + n + lag];
+      return s;
+    };
+    let best = 0, bl = 0;                                // coarse (step 3) then refine
+    for (let lag = minLag; lag <= maxLag; lag += 3){
+      const s = corr(lag);
+      if (s > best){ best = s; bl = lag; }
+    }
+    for (let lag = Math.max(minLag, bl - 2); lag <= Math.min(maxLag, bl + 2); lag++){
+      if (lag === bl) continue;
+      const s = corr(lag);
+      if (s > best){ best = s; bl = lag; }
+    }
+    // prefer the fundamental over lag multiples (octave-error correction)
+    for (let guard = 0; guard < 4 && bl; guard++){
+      let took = false;
+      for (const div of [2, 3]){
+        const cand = Math.round(bl / div);
+        if (cand < minLag) continue;
+        let cb = 0, cl = 0;
+        for (let lag = cand - 2; lag <= cand + 2; lag++){
+          if (lag < minLag) continue;
+          const s = corr(lag);
+          if (s > cb){ cb = s; cl = lag; }
+        }
+        if (cl && cb > 0.9 * best){ bl = cl; best = cb; took = true; break; }
+      }
+      if (!took) break;
+    }
+    if (bl && best / r0 > 0.5) f0[i] = sr / bl;          // voiced
+  }
+
+  /* 2 — MIDI + light 3-wide median (kills single-frame octave blips) */
+  const f = new Float32Array(nF), midi = new Float32Array(nF);
+  for (let i = 0; i < nF; i++){
+    const a = f0[Math.max(0, i - 1)], b = f0[i], c = f0[Math.min(nF - 1, i + 1)];
+    f[i] = Math.max(Math.min(a, b), Math.min(Math.max(a, b), c));
+    midi[i] = f[i] > 0 ? 69 + 12 * Math.log2(f[i] / 440) : 0;
+  }
+
+  /* 3 — key auto-detect: energy-weighted pitch-class histogram, best major scale */
+  const hist = new Float32Array(12);
+  for (let i = 0; i < nF; i++)
+    if (midi[i] > 0) hist[((Math.round(midi[i]) % 12) + 12) % 12] += en[i];
+  let root = 0, bestScore = -1;
+  for (let r = 0; r < 12; r++){
+    let s = 0;
+    for (const d of MAJOR) s += hist[(r + d) % 12];
+    if (s > bestScore){ bestScore = s; root = r; }
+  }
+  const inScale = new Set(MAJOR.map(d => (root + d) % 12));
+
+  /* 4 — exaggerate (2x around median) + hard-snap to nearest scale note */
+  const voiced = [];
+  for (let i = 0; i < nF; i++) if (midi[i] > 0) voiced.push(midi[i]);
+  voiced.sort((a, b) => a - b);
+  const med = voiced.length ? voiced[voiced.length >> 1] : 60;
+  const ratio = new Float32Array(nF).fill(1);
+  for (let i = 0; i < nF; i++){
+    if (midi[i] <= 0) continue;                          // unvoiced passes through
+    const target = med + 2.0 * (midi[i] - med);
+    let note = Math.round(target), bd = 1e9;
+    for (let c = Math.floor(target) - 7; c <= Math.ceil(target) + 7; c++){
+      if (!inScale.has(((c % 12) + 12) % 12)) continue;
+      const d = Math.abs(c - target);
+      if (d < bd){ bd = d; note = c; }
+    }
+    const fT = 440 * Math.pow(2, (note - 69) / 12);
+    ratio[i] = Math.min(2, Math.max(0.5, fT / f[i]));    // instant, zero portamento
+  }
+
+  /* 5 — granular overlap-add resynthesis (Hann, 75% overlap, formants shift) */
+  const out = new Float32Array(x.length), norm = new Float32Array(x.length);
+  const win = new Float32Array(N);
+  for (let n = 0; n < N; n++) win[n] = 0.5 - 0.5 * Math.cos(2 * Math.PI * n / N);
+  const half = N / 2;
+  let off = 0;                    // keeps consecutive grains phase-continuous at the
+  for (let i = 0; i < nF; i++){   // shifted rate so the pitch shift actually lands
+    const o = i * H, ctr = o + half, r = ratio[i];
+    if (Math.abs(off) > 1600) off = 0;                   // re-center, masked by overlap
+    for (let n = 0; n < N; n++){
+      const sp = ctr + off + (n - half) * r;
+      const s0 = Math.floor(sp);
+      if (s0 < 0 || s0 + 1 >= x.length) continue;
+      const fr = sp - s0;
+      out[o + n] += win[n] * (x[s0] * (1 - fr) + x[s0 + 1] * fr);
+      norm[o + n] += win[n];
+    }
+    off += H * (r - 1);
+  }
+  for (let n = 0; n < x.length; n++)
+    out[n] = norm[n] > 1e-4 ? out[n] / norm[n] : x[n];
+
+  const ob = makeBuf(x.length, sr);
+  ob.getChannelData(0).set(out);
+  return ob;
+};
+
+/* ====================== offline mixdown + save ==================== */
+window.__mixdown = async function(){
+  const dur = Math.max(0.1, mixDur());
+  const oc = new OfflineAudioContext(2, Math.ceil(dur * 44100), 44100);
+  buildGraph(oc, oc.destination, 0);
+  return oc.startRendering();
+};
+
+function encodeWav(buf){                                 // 16-bit PCM WAV
+  const nCh = buf.numberOfChannels, sr = buf.sampleRate, len = buf.length;
+  const bytes = 44 + len * nCh * 2;
+  const dv = new DataView(new ArrayBuffer(bytes));
+  const wstr = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  wstr(0, 'RIFF'); dv.setUint32(4, bytes - 8, true); wstr(8, 'WAVE');
+  wstr(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true);
+  dv.setUint16(22, nCh, true); dv.setUint32(24, sr, true);
+  dv.setUint32(28, sr * nCh * 2, true); dv.setUint16(32, nCh * 2, true);
+  dv.setUint16(34, 16, true); wstr(36, 'data'); dv.setUint32(40, len * nCh * 2, true);
+  const chans = [];
+  for (let c = 0; c < nCh; c++) chans.push(buf.getChannelData(c));
+  let o = 44;
+  for (let i = 0; i < len; i++)
+    for (let c = 0; c < nCh; c++){
+      const v = Math.max(-1, Math.min(1, chans[c][i]));
+      dv.setInt16(o, v < 0 ? v * 0x8000 : v * 0x7FFF, true);
+      o += 2;
+    }
+  return dv.buffer;
+}
+
+$('saveBtn').onclick = async () => {
+  if (mixDur() <= 0){ showErr('nothing to save yet — record something first'); return; }
+  const btn = $('saveBtn');
+  btn.disabled = true;
+  try{
+    const mix = await window.__mixdown();
+    const url = URL.createObjectURL(new Blob([encodeWav(mix)], { type: 'audio/wav' }));
+    const a = document.createElement('a');
+    a.href = url; a.download = 'autotune-trend.wav';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  }catch(_){ showErr("couldn't export the mix — try again"); }
+  btn.disabled = false;
+};
+
+/* ============================== init ============================== */
+updateTL();
+setPlayheadUI();
+</script>
+</body>
+</html>
