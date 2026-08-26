@@ -697,16 +697,25 @@ window.autotune = async function(inBuf){
   voiced.sort((a, b) => a - b);
   const med = voiced.length ? voiced[voiced.length >> 1] : 60;
   const fTarg = new Float32Array(nF);                    // 0 = unvoiced, pass through
+  let clamped = 0;                                       // frames capped at ±1 octave
+  const nearestScale = t => {
+    let note = Math.round(t), bd = 1e9;
+    for (let c = Math.floor(t) - 7; c <= Math.ceil(t) + 7; c++){
+      if (!inScale.has(((c % 12) + 12) % 12)) continue;
+      const d = Math.abs(c - t);
+      if (d < bd){ bd = d; note = c; }
+    }
+    return note;
+  };
   for (let i = 0; i < nF; i++){
     if (midi[i] <= 0) continue;
     const target = med + 2.0 * (midi[i] - med);
-    let note = Math.round(target), bd = 1e9;
-    for (let c = Math.floor(target) - 7; c <= Math.ceil(target) + 7; c++){
-      if (!inScale.has(((c % 12) + 12) % 12)) continue;
-      const d = Math.abs(c - target);
-      if (d < bd){ bd = d; note = c; }
+    let note = nearestScale(target);                     // instant, zero portamento
+    if (Math.abs(note - midi[i]) > 12){                  // cap the shift but stay on-grid
+      note = nearestScale(midi[i] + (note > midi[i] ? 12 : -12));
+      clamped++;
     }
-    fTarg[i] = 440 * Math.pow(2, (note - 69) / 12);      // instant, zero portamento
+    fTarg[i] = 440 * Math.pow(2, (note - 69) / 12);
   }
 
   /* 5 — granular overlap-add resynthesis (Hann, 75% overlap, formants shift) */
@@ -714,19 +723,16 @@ window.autotune = async function(inBuf){
   const win = new Float32Array(N);
   for (let n = 0; n < N; n++) win[n] = 0.5 - 0.5 * Math.cos(2 * Math.PI * n / N);
   const half = N / 2;
-  let off = 0, clamped = 0;       // keeps consecutive grains phase-continuous at the
+  let off = 0;                    // keeps consecutive grains phase-continuous at the
   for (let i = 0; i < nF; i++){   // shifted rate so the pitch shift actually lands
     const o = i * H, ctr = o + half;
     if (Math.abs(off) > 1600) off = 0;                   // re-center, masked by overlap
     // ratio: target from THIS frame, detected pitch from the frame actually read
     const ri = Math.min(nF - 1, Math.max(0, Math.round((ctr + off - half) / H)));
     const fD = f[ri] > 0 ? f[ri] : f[i];
-    let r = 1;
-    if (fTarg[i] > 0 && fD > 0){
-      const rr = fTarg[i] / fD;
-      r = Math.min(2, Math.max(0.5, rr));
-      if (rr < 0.5 || rr > 2) clamped++;
-    }
+    const r = fTarg[i] > 0 && fD > 0                     // ±13 st safety bound; the
+      ? Math.min(2.13, Math.max(0.47, fTarg[i] / fD))    // note cap lives in step 4
+      : 1;
     for (let n = 0; n < N; n++){
       const sp = ctr + off + (n - half) * r;
       const s0 = Math.floor(sp);
@@ -746,7 +752,7 @@ window.autotune = async function(inBuf){
     voicedCnt++;
     if (i > 0 && midi[i - 1] > 0 && Math.abs(midi[i] - midi[i - 1]) >= 7) bigJumps++;
   }
-  window.__lastAnalysis = { f0raw, midi, voiced: voicedCnt, bigJumps, clamped, gapsFilled };
+  window.__lastAnalysis = { f0raw, midi, fTarg, root, voiced: voicedCnt, bigJumps, clamped, gapsFilled };
 
   const ob = makeBuf(x.length, sr);
   ob.getChannelData(0).set(out);
