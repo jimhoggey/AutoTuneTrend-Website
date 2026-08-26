@@ -162,6 +162,8 @@ let backVol = 0.4;              // backing track gain (slider-controlled)
 let backGainNode = null;        // live backing GainNode while playing
 let vocVol = 1.0;               // vocal clips gain (slider-controlled)
 let vocGainNodes = [];          // live vocal GainNodes while playing
+let wobbleStep = 0.15;          // sustain-wobble step (s), tempo-synced to the backing
+window.__bpm = null;
 
 function ensureCtx(){
   if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
@@ -198,12 +200,17 @@ function setPlayheadUI(){
   $('playhead').style.left = (SLOT_W + ph * PPS) + 'px';
   $('phTime').textContent = ph.toFixed(1) + 's';
 }
+function followScroll(){                 // keep the playhead in view
+  const sc = $('scroller'), px = SLOT_W + ph * PPS;
+  if (px > sc.scrollLeft + sc.clientWidth * 0.75 || px < sc.scrollLeft + SLOT_W)
+    sc.scrollLeft = Math.max(0, px - sc.clientWidth * 0.35);
+}
 function seekTo(t){
   if (recState) return;
   t = Math.max(0, Math.min(TL, t));
   const wasPlaying = playing;
   if (playing) stopPlayback();
-  ph = t; setPlayheadUI();
+  ph = t; setPlayheadUI(); followScroll();
   if (wasPlaying) startPlayback();
 }
 $('ruler').addEventListener('click', e => {
@@ -257,8 +264,33 @@ $('backFile').onchange = async e => {
     updateTL();
     window.__sections = await detectSections(backing);
     renderSections();
+    window.__bpm = await detectTempo(backing);
+    wobbleStep = window.__bpm ? Math.min(0.25, Math.max(0.1, 30 / window.__bpm)) : 0.15;
   }catch(_){ showErr("couldn't read that audio file — try a different one"); }
 };
+async function detectTempo(buf){                         // eighth-note wobble sync
+  const sr = buf.sampleRate, x = toMono(buf);
+  const hop = 512, nE = Math.floor(Math.min(x.length, 60 * sr) / hop);
+  const env = new Float32Array(nE);
+  for (let i = 0; i < nE; i++){                          // onset envelope (RMS)
+    let e = 0;
+    const o = i * hop;
+    for (let k = 0; k < hop; k++){ const v = x[o + k]; e += v * v; }
+    env[i] = Math.sqrt(e / hop);
+    if ((i & 511) === 511) await new Promise(r => setTimeout(r));
+  }
+  const d = new Float32Array(nE);
+  for (let i = 1; i < nE; i++) d[i] = Math.max(0, env[i] - env[i - 1]);
+  const fps = sr / hop;
+  const minLag = Math.round(fps * 60 / 180), maxLag = Math.min(nE - 2, Math.round(fps));
+  let best = 0, bl = 0;
+  for (let lag = minLag; lag <= maxLag; lag++){
+    let s = 0;
+    for (let i = 0; i + lag < nE; i++) s += d[i] * d[i + lag];
+    if (s > best){ best = s; bl = lag; }
+  }
+  return bl && best > 0 ? 60 * fps / bl : null;
+}
 function drawBacking(){
   let cv = backLane.querySelector('.backwave');
   if (!cv){
@@ -511,6 +543,7 @@ function tick(){
       document.documentElement.style.setProperty('--tlw', TL * PPS + 'px');
     }
   }
+  followScroll();
   setPlayheadUI();
 }
 function stopPlayback(){
@@ -707,6 +740,7 @@ window.autotune = async function(inBuf){
     }
     return note;
   };
+  const tNote = new Int16Array(nF);
   for (let i = 0; i < nF; i++){
     if (midi[i] <= 0) continue;
     const target = med + 2.0 * (midi[i] - med);
@@ -715,7 +749,37 @@ window.autotune = async function(inBuf){
       note = nearestScale(midi[i] + (note > midi[i] ? 12 : -12));
       clamped++;
     }
+    tNote[i] = note;
     fTarg[i] = 440 * Math.pow(2, (note - 69) / 12);
+  }
+
+  /* 4b — sustain wobble: held notes dance between scale notes, short snaps stay */
+  const degShift = (note, d) => {                        // move d scale positions
+    let n = note;
+    const step = d > 0 ? 1 : -1;
+    for (let k = 0; k < Math.abs(d); k++)
+      do { n += step; } while (!inScale.has(((n % 12) + 12) % 12));
+    return n;
+  };
+  const holdFrames = Math.round(0.35 * sr / H);
+  const wobFrames = Math.max(1, Math.round(wobbleStep * sr / H));
+  const CYC = [1, 0, 2, 0, 1, -1];
+  let wobbledRuns = 0;
+  for (let i = 0; i < nF; ){
+    if (!(fTarg[i] > 0)){ i++; continue; }
+    let j = i + 1;
+    while (j < nF && fTarg[j] > 0 && tNote[j] === tNote[i]) j++;
+    if (j - i > holdFrames){
+      wobbledRuns++;
+      const base = tNote[i];
+      for (let k = i + holdFrames; k < j; k++){
+        const d = CYC[Math.floor((k - i - holdFrames) / wobFrames) % CYC.length];
+        const n = d === 0 ? base : degShift(base, d);
+        tNote[k] = n;
+        fTarg[k] = 440 * Math.pow(2, (n - 69) / 12);     // instant steps, no portamento
+      }
+    }
+    i = j;
   }
 
   /* 5 — granular overlap-add resynthesis (Hann, 75% overlap, formants shift) */
@@ -752,7 +816,8 @@ window.autotune = async function(inBuf){
     voicedCnt++;
     if (i > 0 && midi[i - 1] > 0 && Math.abs(midi[i] - midi[i - 1]) >= 7) bigJumps++;
   }
-  window.__lastAnalysis = { f0raw, midi, fTarg, root, voiced: voicedCnt, bigJumps, clamped, gapsFilled };
+  window.__lastAnalysis = { f0raw, midi, fTarg, root, voiced: voicedCnt, bigJumps,
+                            clamped, gapsFilled, wobbledRuns, wobbleStep };
 
   const ob = makeBuf(x.length, sr);
   ob.getChannelData(0).set(out);
