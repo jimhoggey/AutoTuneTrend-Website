@@ -767,7 +767,7 @@ window.autotune = async function(inBuf){
     fTarg[i] = 440 * Math.pow(2, (note - 69) / 12);
   }
 
-  /* 4b — sustain wobble: held notes dance between scale notes, short snaps stay */
+  /* 4b — sustain wobble: held notes glide melodically, short snaps stay instant */
   const degShift = (note, d) => {                        // move d scale positions
     let n = note;
     const step = d > 0 ? 1 : -1;
@@ -776,21 +776,20 @@ window.autotune = async function(inBuf){
     return n;
   };
   const holdFrames = Math.round(0.35 * sr / H);
-  const wobFrames = Math.max(1, Math.round(wobbleStep * sr / H));
-  const CYC = [1, 0, 2, 0, 1, -1];
+  const period = Math.max(2, Math.round(wobbleStep * 2 * sr / H));   // one full up-down cycle
   let wobbledRuns = 0;
   for (let i = 0; i < nF; ){
     if (!(fTarg[i] > 0)){ i++; continue; }
     let j = i + 1;
     while (j < nF && fTarg[j] > 0 && tNote[j] === tNote[i]) j++;
     if (j - i > holdFrames){
-      wobbledRuns++;
-      const base = tNote[i];
+      wobbledRuns++;                                     // sine glide, same audible rate
+      const base = tNote[i];                             // as the old +2/-1-degree cycle
+      const ampSt = (Math.abs(degShift(base, 2) - base) + Math.abs(degShift(base, -1) - base)) / 2;
       for (let k = i + holdFrames; k < j; k++){
-        const d = CYC[Math.floor((k - i - holdFrames) / wobFrames) % CYC.length];
-        const n = d === 0 ? base : degShift(base, d);
-        tNote[k] = n;
-        fTarg[k] = 440 * Math.pow(2, (n - 69) / 12);     // instant steps, no portamento
+        const phase = 2 * Math.PI * (k - i - holdFrames) / period;
+        const targetMidi = base + ampSt * Math.sin(phase);   // continuous, not scale-snapped
+        fTarg[k] = 440 * Math.pow(2, (targetMidi - 69) / 12);
       }
     }
     i = j;
