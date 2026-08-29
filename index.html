@@ -25,6 +25,28 @@
     display:none; margin:6px 14px 0; padding:8px 12px; border-radius:8px;
     background:#3a1518; color:#ffb4b4; font-size:13px; flex:none;
   }
+  .modalBackdrop{
+    position:fixed; inset:0; z-index:20; background:rgba(0,0,0,.6);
+    display:flex; align-items:center; justify-content:center; padding:20px;
+  }
+  .modalBackdrop[hidden]{display:none;}
+  .modalCard{
+    background:#16161c; border:1px solid #2a2a33; border-radius:14px;
+    padding:20px; max-width:340px; width:100%; color:var(--ink);
+  }
+  .modalCard h2{font-size:17px; margin-bottom:12px;}
+  .modalCard ol{padding-left:20px; font-size:13px; line-height:1.55; margin-bottom:12px;}
+  .modalCard .ytnote{font-size:11px; color:var(--dim); margin-bottom:16px; line-height:1.4;}
+  #ytRecRow{display:flex; align-items:center; gap:8px; margin-bottom:16px; font-size:14px;}
+  #ytRecRow[hidden]{display:none;}
+  .ytdot{width:12px; height:12px; border-radius:50%; background:var(--red); animation:pulse .9s ease-in-out infinite; flex:none;}
+  .modalBtns{display:flex; gap:10px; justify-content:flex-end; flex-wrap:wrap;}
+  .modalBtns button{
+    border-radius:8px; padding:10px 16px; font-size:14px; cursor:pointer;
+    border:1px solid #33333e; background:#22222b; color:var(--ink);
+  }
+  .modalBtns button[hidden]{display:none;}
+  #ytStart{background:var(--orange); color:#1a0e05; border-color:var(--orange); font-weight:600;}
   #scroller{flex:1; overflow:auto; position:relative; overscroll-behavior:contain;}
   #content{position:relative; width:max-content; min-width:100%;}
 
@@ -64,11 +86,18 @@
   .bslot{border-color:#4a2a10; color:var(--orange); font-size:22px;}
 
   .lane{position:relative; flex:none; width:var(--tlw); overflow:hidden;}
-  .addback{
-    position:absolute; left:8px; top:50%; transform:translateY(-50%);
-    background:none; border:1px dashed #4a2a10; color:var(--orange);
+  .row.backrow{height:auto; min-height:var(--rowh);}
+  .backctl{
+    display:flex; flex-wrap:wrap; align-items:center; gap:6px; padding:8px 8px;
+    max-width:calc(100vw - var(--slotw) - 24px);
+  }
+  .addback,.addyt{
+    background:none; border:1px dashed #4a2a10; color:var(--orange); white-space:nowrap;
     border-radius:8px; padding:8px 14px; font-size:13px; cursor:pointer;
   }
+  .addyt:disabled{opacity:.4; cursor:default;}
+  .ytwrap{display:flex; flex-wrap:wrap; align-items:center; gap:6px;}
+  .ythint{color:var(--dim); font-size:11px; white-space:nowrap;}
   .lane canvas.backwave{position:absolute; left:0; top:4px;}
   .secchip{
     position:absolute; top:2px; z-index:2; cursor:pointer;
@@ -147,6 +176,25 @@
 
 <input type="file" id="backFile" accept="audio/*" hidden>
 <input type="file" id="faceFile" accept="image/*" capture="user" hidden>
+
+<div id="ytModal" class="modalBackdrop" hidden>
+  <div class="modalCard">
+    <h2>Use audio from YouTube</h2>
+    <ol>
+      <li>Open the YouTube video in another tab and press play there.</li>
+      <li>Tap "Start capture" below.</li>
+      <li>When your browser asks what to share, choose that YouTube tab (not "Entire Screen") and make sure "Share tab audio" is checked, then click Share.</li>
+      <li>It records as the song plays — tap "Use this" whenever you want to stop (or let it play out).</li>
+    </ol>
+    <p class="ytnote">Works in Chrome on desktop and Android. Not supported in Safari on iPhone/iPad — upload a file there instead.</p>
+    <div id="ytRecRow" hidden><span class="ytdot"></span><span id="ytTimer">0:00</span></div>
+    <div class="modalBtns">
+      <button id="ytStart">Start capture</button>
+      <button id="ytUse" hidden>Use this</button>
+      <button id="ytCancel">Cancel</button>
+    </div>
+  </div>
+</div>
 
 <script>
 'use strict';
@@ -249,15 +297,32 @@ function drawWave(cv, data, color, wPx, hPx){
 
 /* ========================= backing track ========================== */
 const backRow = document.createElement('div');
-backRow.className = 'row';
+backRow.className = 'row backrow';
 backRow.innerHTML = `
   <div class="slotcol"><button class="slot bslot" aria-label="backing track">♫</button></div>
-  <div class="lane"><button class="addback">＋ add backing track</button></div>`;
+  <div class="lane"><div class="backctl">
+    <button class="addback">＋ add backing track</button>
+    <span class="ytwrap">
+      <button class="addyt" id="ytBtn">🔗 YouTube audio</button>
+      <span class="ythint">(Chrome only)</span>
+    </span>
+  </div></div>`;
 $('rows').appendChild(backRow);
 const backLane = backRow.querySelector('.lane');
 backRow.querySelector('.addback').onclick = () => $('backFile').click();
 backRow.querySelector('.bslot').onclick = () => $('backFile').click();
+$('ytBtn').onclick = () => { if (!recState) openYtModal(); };
 
+async function setBacking(buf){
+  backing = buf;
+  backLane.querySelector('.addback').style.display = 'none';
+  backLane.querySelector('.ytwrap').style.display = 'none';
+  updateTL();
+  window.__sections = await detectSections(backing);
+  renderSections();
+  window.__bpm = await detectTempo(backing);
+  wobbleStep = window.__bpm ? Math.min(0.25, Math.max(0.1, 30 / window.__bpm)) : 0.15;
+}
 $('backFile').onchange = async e => {
   const f = e.target.files[0];
   e.target.value = '';
@@ -265,13 +330,7 @@ $('backFile').onchange = async e => {
   try{
     if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
     const ab = await f.arrayBuffer();
-    backing = await decode(ab);
-    backLane.querySelector('.addback').style.display = 'none';
-    updateTL();
-    window.__sections = await detectSections(backing);
-    renderSections();
-    window.__bpm = await detectTempo(backing);
-    wobbleStep = window.__bpm ? Math.min(0.25, Math.max(0.1, 30 / window.__bpm)) : 0.15;
+    await setBacking(await decode(ab));
   }catch(_){ showErr("couldn't read that audio file — try a different one"); }
 };
 async function detectTempo(buf){                         // eighth-note wobble sync
@@ -310,6 +369,98 @@ function drawBacking(){
 }
 const decode = ab => new Promise((res, rej) => AC.decodeAudioData(ab, res, rej));
 
+/* ==================== YouTube tab-audio capture ==================== */
+let ytCap = null;                 // {stream, mr, chunks, startTime, timerId}
+function ytStopTracks(stream){ if (stream) stream.getTracks().forEach(t => { try{ t.stop(); }catch(_){} }); }
+function ytIdleUI(){ $('ytRecRow').hidden = true; $('ytStart').hidden = false; $('ytUse').hidden = true; }
+function openYtModal(){ if (recState || ytCap) return; ytIdleUI(); $('ytModal').hidden = false; }
+function closeYtModal(){ $('ytModal').hidden = true; }
+function ytTick(){
+  if (!ytCap) return;
+  const s = Math.floor((performance.now() - ytCap.startTime) / 1000);
+  $('ytTimer').textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+}
+$('ytStart').onclick = async () => {
+  if (recState || ytCap) return;
+  ensureCtx();
+  if (playing) stopPlayback();
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia){
+    closeYtModal();
+    showErr("YouTube capture isn't supported in this browser — try Chrome, or upload an audio file instead");
+    return;
+  }
+  let stream;
+  try{
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+  }catch(err){
+    if (err && err.name === 'NotSupportedError'){
+      closeYtModal();
+      showErr("YouTube capture isn't supported in this browser — try Chrome, or upload an audio file instead");
+    }
+    return;                       // otherwise: a plain user cancel — stay on the idle modal
+  }
+  stream.getVideoTracks().forEach(t => { try{ t.stop(); }catch(_){} });
+  const audioTracks = stream.getAudioTracks();
+  if (!audioTracks.length){
+    ytStopTracks(stream);
+    showErr("no audio was shared — try again and make sure 'share tab audio' is checked");
+    return;
+  }
+  let mr;
+  try{ mr = new MediaRecorder(new MediaStream(audioTracks)); }
+  catch(_){
+    ytStopTracks(stream);
+    closeYtModal();
+    showErr("YouTube capture isn't supported in this browser — try Chrome, or upload an audio file instead");
+    return;
+  }
+  const chunks = [];
+  mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  mr.onstop = ytFinish;
+  ytCap = { stream, mr, chunks, startTime: performance.now(), timerId: 0 };
+  audioTracks[0].onended = ytFinalize;      // "Stop sharing" bar / source tab closed
+  try{ mr.start(); }
+  catch(_){
+    ytStopTracks(stream);
+    ytCap = null;
+    closeYtModal();
+    showErr("YouTube capture isn't supported in this browser — try Chrome, or upload an audio file instead");
+    return;
+  }
+  $('ytStart').hidden = true; $('ytUse').hidden = false; $('ytRecRow').hidden = false;
+  ytCap.timerId = setInterval(ytTick, 250);
+  ytTick();
+};
+function ytFinalize(){                      // "Use this" or auto via track onended
+  if (!ytCap) return;
+  clearInterval(ytCap.timerId);
+  try{ ytCap.mr.stop(); }catch(_){ ytFinish(); }
+}
+$('ytUse').onclick = ytFinalize;
+$('ytCancel').onclick = () => {
+  if (ytCap){
+    clearInterval(ytCap.timerId);
+    ytStopTracks(ytCap.stream);
+    try{ ytCap.mr.stop(); }catch(_){}
+    ytCap = null;                            // nulled before onstop fires: discards output
+  }
+  closeYtModal();
+};
+function ytFinish(){
+  const cap = ytCap;
+  if (!cap) return;                          // cancelled — output already discarded
+  ytCap = null;
+  ytStopTracks(cap.stream);
+  (async () => {
+    try{
+      if (!cap.chunks.length) throw new Error('empty');
+      const buf = await decode(await new Blob(cap.chunks).arrayBuffer());
+      await setBacking(buf);
+    }catch(_){ showErr("couldn't process that capture — try again"); }
+    closeYtModal();
+  })();
+}
+
 /* ========================== vocal tracks ========================== */
 function makeTrack(){
   const color = COLORS[tracks.length % COLORS.length];
@@ -329,13 +480,14 @@ function makeTrack(){
               buf: null, start: 0, color, img: null, clipEl: null };
   t.slot.onclick = () => {
     ensureCtx();
+    if (ytCap) return;             // a YouTube capture is recording — mutually exclusive
     if (recState){ if (recState.track === t) stopRec(); return; }
     if (t.buf){ faceTarget = t; $('faceFile').click(); }
     else startRec(t);
   };
   row.querySelector('.rerec').onclick = () => {
     ensureCtx();
-    if (recState) return;
+    if (recState || ytCap) return;
     clearClip(t); startRec(t);
   };
   row.querySelector('.del').onclick = () => { if (!recState) clearClip(t); };
@@ -401,7 +553,7 @@ function renderClip(t){
 
 /* =========================== recording ============================ */
 async function startRec(track){
-  if (exporting) return;                   // no recording while a video renders
+  if (exporting || ytCap) return;          // no recording while a video renders or a YT capture runs
   const c = ensureCtx();
   if (playing) stopPlayback();
   let stream;
@@ -449,6 +601,7 @@ async function startRec(track){
     return;
   }
   track.slot.classList.add('recording');
+  $('ytBtn').disabled = true;
   startPlayback();                         // hear the mix while singing
 }
 function stopRec(){
@@ -464,6 +617,7 @@ async function finishRec(){
   try{ rs.micSrc.disconnect(); }catch(_){}
   rs.stream.getTracks().forEach(t => t.stop());
   rs.track.slot.classList.remove('recording');
+  $('ytBtn').disabled = false;
   updateTL();                              // settle any provisional extension
   ph = rs.start; setPlayheadUI();
   try{
